@@ -1212,6 +1212,75 @@ func TestStorageSubpaths(t *testing.T) {
 	})
 }
 
+func TestRemoteStoreRootDirAlwaysSlash(t *testing.T) {
+	tskip.SkipS3(t)
+
+	endpoint := os.Getenv("S3MOCK_ENDPOINT")
+	bucket := "zot-rootdir-test"
+
+	_, err := resty.R().Put("http://" + endpoint + "/" + bucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	driverParams := map[string]any{
+		"name":           storageConstants.S3StorageDriverName,
+		"region":         "us-east-2",
+		"bucket":         bucket,
+		"regionendpoint": endpoint,
+		"accesskey":      "minioadmin",
+		"secretkey":      "minioadmin",
+		"secure":         false,
+		"skipverify":     false,
+		"forcepathstyle": true,
+		"rootdirectory":  "/custom-prefix",
+	}
+
+	Convey("Default store rootDir is / regardless of storageDriver rootdirectory", t, func() {
+		conf := config.New()
+		conf.Storage.RootDirectory = t.TempDir()
+		conf.Storage.StorageDriver = driverParams
+
+		storeController, err := storage.New(conf, nil, nil, zlog.NewTestLogger(), nil)
+		So(err, ShouldBeNil)
+		So(storeController.DefaultStore, ShouldNotBeNil)
+		So(storeController.DefaultStore.RootDir(), ShouldEqual, "/")
+	})
+
+	Convey("Subpath store rootDir is / regardless of storageDriver rootdirectory", t, func() {
+		conf := config.New()
+		conf.Storage.RootDirectory = t.TempDir()
+
+		subDriverParams := map[string]any{
+			"name":           storageConstants.S3StorageDriverName,
+			"region":         "us-east-2",
+			"bucket":         bucket,
+			"regionendpoint": endpoint,
+			"accesskey":      "minioadmin",
+			"secretkey":      "minioadmin",
+			"secure":         false,
+			"skipverify":     false,
+			"forcepathstyle": true,
+			"rootdirectory":  "/subpath-prefix",
+		}
+
+		conf.Storage.SubPaths = map[string]config.StorageConfig{
+			"/a": {
+				RootDirectory: t.TempDir(),
+				StorageDriver: subDriverParams,
+			},
+		}
+
+		storeController, err := storage.New(conf, nil, nil, zlog.NewTestLogger(), nil)
+		So(err, ShouldBeNil)
+		So(storeController.SubStore, ShouldNotBeNil)
+
+		subStore := storeController.SubStore["/a"]
+		So(subStore, ShouldNotBeNil)
+		So(subStore.RootDir(), ShouldEqual, "/")
+	})
+}
+
 func TestDeleteBlobsInUse(t *testing.T) {
 	for _, testcase := range testCases {
 		t.Run(testcase.testCaseName, func(t *testing.T) {
