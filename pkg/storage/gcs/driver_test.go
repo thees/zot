@@ -277,11 +277,25 @@ func TestDriver(t *testing.T) {
 		})
 
 		Convey("Walk", func() {
-			storeMock.WalkFn = func(ctx context.Context, path string, f driver.WalkFn, _ ...func(*driver.WalkOptions)) error {
-				return nil
-			}
-			err := gcsDriver.Walk("/test", nil)
-			So(err, ShouldBeNil)
+			Convey("Normal path", func() {
+				storeMock.WalkFn = func(ctx context.Context, path string, f driver.WalkFn, _ ...func(*driver.WalkOptions)) error {
+					return nil
+				}
+				err := gcsDriver.Walk("/test", nil)
+				So(err, ShouldBeNil)
+			})
+
+			Convey("Root path '/' is normalized to empty string for GCS listing", func() {
+				var receivedPath string
+				storeMock.WalkFn = func(ctx context.Context, path string, f driver.WalkFn, _ ...func(*driver.WalkOptions)) error {
+					receivedPath = path
+
+					return nil
+				}
+				err := gcsDriver.Walk("/", nil)
+				So(err, ShouldBeNil)
+				So(receivedPath, ShouldEqual, "")
+			})
 		})
 
 		Convey("List", func() {
@@ -292,6 +306,19 @@ func TestDriver(t *testing.T) {
 				l, err := gcsDriver.List("/test")
 				So(err, ShouldBeNil)
 				So(l, ShouldResemble, []string{"a"})
+			})
+
+			Convey("Root path '/' is normalized to empty string for GCS listing", func() {
+				var receivedPath string
+				storeMock.ListFn = func(ctx context.Context, path string) ([]string, error) {
+					receivedPath = path
+
+					return []string{"repo1", "repo2"}, nil
+				}
+				l, err := gcsDriver.List("/")
+				So(err, ShouldBeNil)
+				So(l, ShouldResemble, []string{"repo1", "repo2"})
+				So(receivedPath, ShouldEqual, "")
 			})
 
 			Convey("Error", func() {

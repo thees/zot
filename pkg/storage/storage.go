@@ -79,12 +79,12 @@ func New(config *config.Config, linter common.Lint, metrics monitoring.MetricSer
 			return storeController, err
 		}
 
-		/* in the case of s3 config.Storage.RootDirectory is used for caching blobs locally and
-		config.Storage.StorageDriver["rootdirectory"] is the actual rootDir in s3 */
+		/* config.Storage.RootDirectory is used for caching blobs locally.
+		config.Storage.StorageDriver["rootdirectory"] is passed to the upstream storage driver
+		(S3/GCS) which handles prefixing internally. The rootDir for zot's ImageStore must
+		always be "/" — passing the driver's rootdirectory here would double-prefix every path
+		since the upstream driver already applies it in pathToKey/s3Path. */
 		rootDir := "/"
-		if config.Storage.StorageDriver["rootdirectory"] != nil {
-			rootDir = fmt.Sprintf("%v", config.Storage.StorageDriver["rootdirectory"])
-		}
 
 		cacheDriver, err := CreateCacheDatabaseDriver(config.Storage.StorageConfig, log)
 		if err != nil {
@@ -201,12 +201,10 @@ func getSubStore(cfg *config.Config, subPaths map[string]config.StorageConfig,
 				return nil, err
 			}
 
-			/* in the case of s3 c.Config.Storage.RootDirectory is used for caching blobs locally and
-			c.Config.Storage.StorageDriver["rootdirectory"] is the actual rootDir in s3 */
+			/* config.Storage.RootDirectory is used for caching blobs locally.
+			The upstream storage driver handles rootdirectory prefixing internally,
+			so rootDir for zot's ImageStore must always be "/". */
 			rootDir := "/"
-			if cfg.Storage.StorageDriver["rootdirectory"] != nil {
-				rootDir = fmt.Sprintf("%v", cfg.Storage.StorageDriver["rootdirectory"])
-			}
 
 			cacheDriver, err := CreateCacheDatabaseDriver(storageConfig, log)
 			if err != nil {

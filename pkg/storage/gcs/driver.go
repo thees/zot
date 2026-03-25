@@ -116,16 +116,27 @@ func (driver *Driver) WriteFile(filepath string, content []byte) (int, error) {
 }
 
 func (driver *Driver) Walk(path string, f storagedriver.WalkFn) error {
-	return driver.formatErr(driver.store.Walk(context.Background(), path, f), path)
+	return driver.formatErr(driver.store.Walk(context.Background(), normalizePath(path), f), path)
 }
 
 func (driver *Driver) List(fullpath string) ([]string, error) {
-	list, err := driver.store.List(context.Background(), fullpath)
+	list, err := driver.store.List(context.Background(), normalizePath(fullpath))
 	if err != nil {
 		return nil, driver.formatErr(err, fullpath)
 	}
 
 	return list, nil
+}
+
+// normalizePath converts a bare "/" root path to "" (empty string) so the
+// upstream GCS driver lists all objects in the bucket instead of searching
+// for keys prefixed with "/" (which never exist in GCS).
+func normalizePath(path string) string {
+	if path == "/" {
+		return ""
+	}
+
+	return path
 }
 
 func (driver *Driver) Move(sourcePath string, destPath string) error {
