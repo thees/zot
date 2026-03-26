@@ -116,7 +116,14 @@ func (driver *Driver) WriteFile(filepath string, content []byte) (int, error) {
 }
 
 func (driver *Driver) Walk(path string, f storagedriver.WalkFn) error {
-	return driver.formatErr(driver.store.Walk(context.Background(), path, f), path)
+	err := driver.store.Walk(context.Background(), path, f)
+	// io.EOF is used by callers (e.g. GetNextRepository) as a stop signal, not an error.
+	// Return it unwrapped so errors.Is(err, io.EOF) works upstream.
+	if errors.Is(err, io.EOF) {
+		return io.EOF
+	}
+
+	return driver.formatErr(err, path)
 }
 
 func (driver *Driver) List(fullpath string) ([]string, error) {
