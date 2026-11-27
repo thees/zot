@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"sync"
+	"time"
 
 	"github.com/distribution/distribution/v3/registry/storage/driver"
 	godigest "github.com/opencontainers/go-digest"
@@ -119,7 +120,8 @@ func parseStorage(metaDB mTypes.MetaDB, storeController stypes.StoreController, 
 }
 
 // parseStorageRepo parses repo into the metaDB unless the metaDB is already newer than its
-// index.json. Errors are logged here, and partial is reported the same way parseRepo does.
+// index.json and covers every image listed there. Errors are logged here, and partial is reported
+// the same way parseRepo does.
 func parseStorageRepo(repo string, metaDB mTypes.MetaDB, storeController stypes.StoreController, log log.Logger,
 ) (bool, error) {
 	imgStore := storeController.GetImageStore(repo)
@@ -135,9 +137,13 @@ func parseStorageRepo(repo string, metaDB mTypes.MetaDB, storeController stypes.
 	metaLastUpdated := metaDB.GetRepoLastUpdated(repo)
 
 	// If repo metadata doesn't exist (zero time), always parse it
-	// Otherwise, only parse if storage is newer than metadata
+	// Otherwise, only parse if storage is newer than metadata or the metadata misses part of the storage
 	if !metaLastUpdated.IsZero() && storageLastUpdated.Before(metaLastUpdated) {
-		return false, nil
+		if repoMetaCoversIndex(repo, metaDB, imgStore, log) {
+			return false, nil
+		}
+
+		log.Info().Str("repo", repo).Msg("repo meta is newer than index.json but incomplete, parsing repo")
 	}
 
 	partial, err := parseRepo(repo, metaDB, storeController, log)
@@ -148,6 +154,112 @@ func parseStorageRepo(repo string, metaDB mTypes.MetaDB, storeController stypes.
 	}
 
 	return partial, nil
+}
+
+// repoMetaCoversIndex reports whether the repo meta holds every image manifest and index listed in the
+// repo's index.json. It reads no manifest blob; any error counts as not covered.
+func repoMetaCoversIndex(repo string, metaDB mTypes.MetaDB, imgStore stypes.ImageStore, log log.Logger) bool {
+	covered := false
+
+	err := imgStore.WithRepoReadLock(repo, func() error {
+		indexBlob, err := imgStore.GetIndexContent(repo)
+
+		var indexContent ispec.Index
+
+		if err == nil {
+			err = json.Unmarshal(indexBlob, &indexContent)
+		}
+
+		if err != nil {
+			return err
+		}
+
+		repoMeta, err := metaDB.GetRepoMeta(context.Background(), repo)
+		if err != nil {
+			return err
+		}
+
+		signatureDigests := signatureManifestDigests(repoMeta)
+
+		for _, descriptor := range indexContent.Manifests {
+			descriptorCovered, err := isDescriptorCovered(repo, descriptor, repoMeta, signatureDigests, imgStore)
+			if err != nil {
+				return err
+			}
+
+			if !descriptorCovered {
+				return nil
+			}
+		}
+
+		covered = true
+
+		return nil
+	})
+	if err != nil {
+		log.Warn().Err(err).Str("repo", repo).Msg("failed to check whether repo meta covers index.json")
+
+		return false
+	}
+
+	return covered
+}
+
+// isDescriptorCovered reports whether the repo meta accounts for an index.json descriptor. Descriptors parseRepo
+// does not store in the repo meta are covered, so is a descriptor whose manifest blob is gone from storage.
+func isDescriptorCovered(repo string, descriptor ispec.Descriptor, repoMeta mTypes.RepoMeta,
+	signatureDigests map[string]struct{}, imgStore stypes.ImageStore,
+) (bool, error) {
+	if !compat.IsImageManifestMediaType(descriptor.MediaType) && !compat.IsImageIndexMediaType(descriptor.MediaType) {
+		return true, nil
+	}
+
+	tag := descriptor.Annotations[ispec.AnnotationRefName]
+	if zcommon.IsReferrersTag(tag) {
+		return true, nil
+	}
+
+	digest := descriptor.Digest.String()
+
+	if _, isSignature := signatureDigests[digest]; isSignature {
+		return true, nil
+	}
+
+	if _, hasStatistics := repoMeta.Statistics[digest]; hasStatistics &&
+		(tag == "" || repoMeta.Tags[tag].Digest == digest) {
+		return true, nil
+	}
+
+	return isManifestBlobMissing(repo, descriptor.Digest, imgStore)
+}
+
+// isManifestBlobMissing mirrors how parseRepo recognises a missing manifest blob.
+func isManifestBlobMissing(repo string, digest godigest.Digest, imgStore stypes.ImageStore) (bool, error) {
+	found, _, _, err := imgStore.StatBlob(repo, digest)
+	if found || err == nil {
+		return false, nil
+	}
+
+	var pathNotFoundErr driver.PathNotFoundError
+	if errors.Is(err, zerr.ErrBlobNotFound) || errors.As(err, &pathNotFoundErr) {
+		return true, nil
+	}
+
+	return false, err
+}
+
+func signatureManifestDigests(repoMeta mTypes.RepoMeta) map[string]struct{} {
+	digests := map[string]struct{}{}
+
+	for _, signaturesByType := range repoMeta.Signatures {
+		for _, signatureInfos := range signaturesByType {
+			for _, signatureInfo := range signatureInfos {
+				digests[signatureInfo.SignatureManifestDigest] = struct{}{}
+			}
+		}
+	}
+
+	return digests
 }
 
 // FastRestartStamp combines this binary's identity (binaryVersion, from version.CurrentBinaryVersion)
@@ -290,6 +402,10 @@ func parseRepo(repo string, metaDB mTypes.MetaDB, storeController stypes.StoreCo
 			return err
 		}
 
+		// Storage has no pull history. Give newly recovered statistics one full
+		// pull-retention window, using the same timestamp for every image in the repo.
+		initialPullTimestamp := mTypes.WithInitialPullTimestamp(time.Now())
+
 		for _, manifest := range indexContent.Manifests {
 			tag := manifest.Annotations[ispec.AnnotationRefName]
 
@@ -326,7 +442,7 @@ func parseRepo(repo string, metaDB mTypes.MetaDB, storeController stypes.StoreCo
 			// mod time is the closest remaining record of when the image was pushed. Pass it as a
 			// hint so a metaDB rebuild doesn't stamp every image with the current time. StatBlob
 			// requires the repo lock, which this function already holds.
-			setOpts := []mTypes.SetRepoReferenceOption{}
+			setOpts := []mTypes.SetRepoReferenceOption{initialPullTimestamp}
 			if found, _, modTime, err := imageStore.StatBlob(repo, manifest.Digest); err == nil && found {
 				setOpts = append(setOpts, mTypes.WithPushTimestamp(modTime))
 			}
